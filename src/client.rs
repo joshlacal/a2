@@ -301,28 +301,41 @@ impl Client {
     }
 }
 
+fn default_tls_config() -> rustls::ClientConfig {
+    // Choose a provider explicitly: consumers may also enable aws-lc for other
+    // HTTPS clients. Relying on the process default is then ambiguous.
+    rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("the ring provider supports the default TLS versions")
+        .with_webpki_roots()
+        .with_no_client_auth()
+}
+
 fn default_connector() -> HyperConnector {
     HttpsConnectorBuilder::new()
-        .with_webpki_roots()
+        .with_tls_config(default_tls_config())
         .https_only()
         .enable_http2()
         .build()
 }
 
-fn client_cert_connector(mut cert_pem: &[u8], mut key_pem: &[u8]) -> Result<HyperConnector, Error> {
+fn client_cert_connector(cert_pem: &[u8], key_pem: &[u8]) -> Result<HyperConnector, Error> {
     let private_key_error = || io::Error::new(io::ErrorKind::InvalidData, "private key");
 
-    let key = rustls_pemfile::pkcs8_private_keys(&mut key_pem)
-        .next()
-        .ok_or_else(private_key_error)?
-        .map_err(|_| private_key_error())?;
+    use rustls::pki_types::{pem::PemObject as _, CertificateDer, PrivatePkcs8KeyDer};
 
-    let cert_chain: Result<Vec<_>, _> = rustls_pemfile::certs(&mut cert_pem).collect();
+    // Keep the existing PKCS8-only key contract and retain every certificate
+    // in the PEM chain. The maintained pki-types parser replaces rustls-pemfile.
+    let key = PrivatePkcs8KeyDer::from_pem_slice(key_pem).map_err(|_| private_key_error())?;
+    let cert_chain: Result<Vec<_>, _> = CertificateDer::pem_slice_iter(cert_pem).collect();
     let cert_chain = cert_chain.map_err(|_| private_key_error())?;
 
-    let config = rustls::client::ClientConfig::builder()
-        .with_webpki_roots()
-        .with_client_auth_cert(cert_chain, key.into())?;
+    let config = rustls::client::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_webpki_roots()
+    .with_client_auth_cert(cert_chain, key.into())?;
 
     Ok(HttpsConnectorBuilder::new()
         .with_tls_config(config)
@@ -347,6 +360,132 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg8g/n6j9roKvnUkwu
 lCEIvbDqlUhA5FOzcakkG90E8L+hRANCAATKS2ZExEybUvchRDuKBftotMwVEus3
 jDwmlD1Gg0yJt1e38djFwsxsfr5q2hv0Rj9fTEqAPr8H7mGm0wKxZ7iQ
 -----END PRIVATE KEY-----";
+
+    #[test]
+    fn tls_verifies_root_and_hostname_with_both_crypto_providers_enabled() {
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+        use std::io::{Read as _, Write as _};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::Arc;
+
+        // This local certificate is test data, never an APNs credential.
+        let rcgen::CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+                .expect("local TLS test setup must succeed");
+        let cert = cert.der().clone();
+        let server_config =
+            rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("local TLS test setup must succeed")
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der())),
+                )
+                .expect("local TLS test setup must succeed");
+        let server_config = Arc::new(server_config);
+
+        let trusted = || {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(cert.clone()).expect("local TLS test setup must succeed");
+            rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("local TLS test setup must succeed")
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        };
+        for (client_config, hostname, should_succeed) in [
+            (trusted(), "localhost", true),
+            (default_tls_config(), "localhost", false),
+            (trusted(), "wrong.example", false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("local TLS test setup must succeed");
+            let address = listener.local_addr().expect("local TLS test setup must succeed");
+            let server_config = server_config.clone();
+            let server = std::thread::spawn(move || {
+                let (socket, _) = listener.accept().expect("local TLS test setup must succeed");
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .expect("local TLS test setup must succeed");
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(10)))
+                    .expect("local TLS test setup must succeed");
+                let connection =
+                    rustls::ServerConnection::new(server_config).expect("local TLS test setup must succeed");
+                let mut tls = rustls::StreamOwned::new(connection, socket);
+                let mut bytes = [0u8; 4];
+                tls.read_exact(&mut bytes).and_then(|()| tls.write_all(&bytes))
+            });
+            let socket = TcpStream::connect(address).expect("local TLS test setup must succeed");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("local TLS test setup must succeed");
+            socket
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .expect("local TLS test setup must succeed");
+            let connection = rustls::ClientConnection::new(
+                Arc::new(client_config),
+                ServerName::try_from(hostname).expect("local TLS test setup must succeed"),
+            )
+            .expect("local TLS test setup must succeed");
+            let mut tls = rustls::StreamOwned::new(connection, socket);
+            let mut bytes = [0u8; 4];
+            let result = tls.write_all(b"test").and_then(|()| tls.read_exact(&mut bytes));
+            assert_eq!(result.is_ok(), should_succeed, "hostname={hostname}, result={result:?}");
+            if should_succeed {
+                assert_eq!(&bytes, b"test");
+            } else {
+                let error = result.expect_err("negative TLS control must fail");
+                let certificate_error = error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<rustls::Error>());
+                if hostname == "localhost" {
+                    assert!(
+                        matches!(
+                            certificate_error,
+                            Some(rustls::Error::InvalidCertificate(
+                                rustls::CertificateError::UnknownIssuer
+                            ))
+                        ),
+                        "expected unknown issuer, got {error:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            certificate_error,
+                            Some(rustls::Error::InvalidCertificate(
+                                rustls::CertificateError::NotValidForName
+                                    | rustls::CertificateError::NotValidForNameContext { .. }
+                            ))
+                        ),
+                        "expected hostname rejection, got {error:?}"
+                    );
+                }
+            }
+            drop(tls);
+            assert_eq!(
+                server.join().expect("local TLS test setup must succeed").is_ok(),
+                should_succeed
+            );
+        }
+    }
+
+    #[test]
+    fn certificate_parser_keeps_pkcs8_only_contract() {
+        let cert = include_bytes!("../test_cert/test.crt");
+        let key = include_bytes!("../test_cert/test.key");
+        assert!(client_cert_connector(cert, key).is_ok());
+        assert!(client_cert_connector(b"not a certificate", key).is_err());
+        for invalid_key in [
+            b"not a key".as_slice(),
+            b"-----BEGIN RSA PRIVATE KEY-----\nAQID\n-----END RSA PRIVATE KEY-----",
+            b"-----BEGIN EC PRIVATE KEY-----\nAQID\n-----END EC PRIVATE KEY-----",
+        ] {
+            assert!(client_cert_connector(cert, invalid_key).is_err());
+        }
+        let chain = [cert.as_slice(), cert.as_slice()].concat();
+        assert!(client_cert_connector(&chain, key).is_ok());
+    }
 
     #[test]
     fn test_production_request_uri() {

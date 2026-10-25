@@ -14,7 +14,7 @@ repository  = "https://github.com/walletconnect/a2.git"
 homepage    = "https://github.com/walletconnect/a2"
 documentation = "https://docs.rs/a2"
 edition = "2021"
-rust-version = "1.60"  # set the minimum rust version we can work with.
+rust-version = "1.95"  # set the minimum rust version we can work with.
 
 [features]
 default = ["openssl"]
@@ -22,26 +22,28 @@ tracing = ["dep:tracing"]
 ring = ["dep:ring", "pem"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-erased-serde = "0.3"
-serde_json = "1"
-thiserror = "1"
-openssl = { version = "0.10", optional = true }
-hyper = { version = "1.0", default-features = false, features = ["client", "http2"] }
-hyper-util = { version = "0.1", features = ["client", "http2", "client-legacy", "tokio"] }
-http-body-util = "0.1"
-http = "1.0"
-base64 = "0.21"
-tracing = { version = "0.1", optional = true }
-pem = { version = "3.0", optional = true }
-ring = { version = "0.17", features = ["std"], optional = true }
-hyper-rustls = { version = "0.26.0", default-features = false, features = ["http2", "webpki-roots", "ring"] }
-rustls-pemfile = "2.1.1"
-rustls = "0.22.4"
-parking_lot = "0.12"
-tokio = { version = "1", features = ["time"] }
+serde = { version = "1.0.229", features = ["derive"] }
+erased-serde = "0.4.11"
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+openssl = { version = "0.10.81", optional = true }
+hyper = { version = "1.12.0", default-features = false, features = ["client", "http2"] }
+hyper-util = { version = "0.1.21", features = ["client", "http2", "client-legacy", "tokio"] }
+http-body-util = "0.1.5"
+http = "1.5.0"
+base64 = "0.23.1"
+tracing = { version = "0.1.44", optional = true }
+pem = { version = "4.0.0", optional = true }
+ring = { version = "0.17.14", features = ["std"], optional = true }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http2", "webpki-roots", "ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+parking_lot = "0.13.0"
+tokio = { version = "1.54.1", features = ["time"] }
 
 [dev-dependencies]
-argparse = "0.2"
-tracing-subscriber = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Exercise consumers that enable both supported Rustls provider families.
+rustls = { version = "0.23.46", features = ["aws_lc_rs"] }
+rcgen = "0.14.10"
+argparse = "0.2.2"
+tracing-subscriber = "0.3.23"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
