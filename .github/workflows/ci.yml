@@ -30,7 +30,7 @@ jobs:
         os:
           - ubuntu-latest
         rust:
-          - stable
+          - "1.99.1"
         cargo:
           - name: "Clippy"
             cmd: clippy
@@ -63,36 +63,30 @@ jobs:
     steps:
       # Checkout code
       - name: "Git checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Install sccache
-      - name: "Install sccache"
-        if: matrix.os == 'ubuntu-latest'
-        env:
-          SCCACHE_URL: https://github.com/mozilla/sccache/releases/download
-          SCCACHE_VERSION: v0.2.15
-        run: |
-          SCCACHE_FILE=sccache-$SCCACHE_VERSION-x86_64-unknown-linux-musl
-          curl -sSL "$SCCACHE_URL/$SCCACHE_VERSION/$SCCACHE_FILE.tar.gz" | tar xz
-          install -vDm 755 "$SCCACHE_FILE/sccache" "$HOME/.local/bin/sccache"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # Install the current pinned compiler cache.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.19.0
 
       # Install Rust toolchain
       - name: "Install Rust ${{ matrix.rust }}"
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: ${{ matrix.rust }}
-          profile: minimal
-          override: true
+          components: clippy, rustfmt
 
       # Rebuild cache
       - name: Cache cargo registry
-        uses: Swatinem/rust-cache@3bb3a9a087029c7bc392586cdc88cb6f66b9c6ef
-        with: ${{ matrix.cargo.cache }}
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ${{ matrix.cargo.name }}
         continue-on-error: false
 
       - name: Cache sccache
-        uses: actions/cache@v2
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: false
         with:
           path: ${{ matrix.sccache-path }}
@@ -100,20 +94,5 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-sccache-
 
-      # Run job
-      - name: "Start sccache server"
-        run: |
-          sccache --stop-server || true
-          sccache --start-server
-
       - name: "Task ${{ matrix.cargo.name }}"
-        uses: actions-rs/cargo@v1
-        with:
-          command: ${{ matrix.cargo.cmd }}
-          args: ${{ matrix.cargo.args }}
-
-      - name: "Print sccache stats"
-        run: sccache --show-stats
-
-      - name: "Stop sccache server"
-        run: sccache --stop-server || true
+        run: cargo ${{ matrix.cargo.cmd }} ${{ matrix.cargo.args }}
